@@ -1,0 +1,695 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snake Arena - Multiplayer</title>
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#080d18;color:#fff;font-family:Arial,sans-serif;
+  min-height:100vh;display:flex;justify-content:center;
+  align-items:center;padding:20px
+}
+.container{width:100%;max-width:900px;text-align:center}
+h1{font-size:36px;color:#39f5a5;margin-bottom:8px}
+.subtitle{color:#94a3b8;margin-bottom:25px}
+.panel{
+  background:#111c2e;border:1px solid #26364c;
+  border-radius:15px;padding:20px;margin-bottom:18px
+}
+input{
+  background:#080d18;border:1px solid #34445c;color:white;
+  padding:13px;border-radius:8px;width:100%;margin:8px 0;
+  font-size:16px
+}
+button{
+  background:#20c997;color:#06140f;border:0;
+  padding:13px 20px;border-radius:8px;font-weight:bold;
+  cursor:pointer;margin:5px;font-size:15px
+}
+button:hover{filter:brightness(1.12)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.secondary{background:#34445c;color:white}
+#gameArea{display:none}
+#gameCanvas{
+  width:100%;max-width:600px;background:#081321;
+  border:2px solid #20c997;border-radius:10px;
+  display:block;margin:15px auto
+}
+.scores{display:flex;justify-content:space-around;gap:10px}
+.score{background:#080d18;padding:15px;border-radius:10px;flex:1}
+.score h3{font-size:14px;color:#94a3b8}
+.score p{font-size:28px;margin-top:8px;font-weight:bold}
+#status{color:#39f5a5;margin:12px}
+#roomCode{color:#facc15;font-weight:bold;font-size:23px}
+#message{color:#facc15;margin:12px;min-height:22px}
+.controls{color:#94a3b8;font-size:13px;line-height:2}
+.hidden{display:none!important}
+@media(max-width:500px){
+ h1{font-size:27px}
+ .panel{padding:12px}
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+
+  <h1>🐍 SNAKE ARENA</h1>
+  <p class="subtitle">Real-Time Online Multiplayer Snake Game</p>
+
+  <div class="panel" id="lobby">
+    <h2>Enter Your Player Name</h2>
+    <input id="playerName" maxlength="15" placeholder="Your name">
+
+    <button onclick="createRoom()">Create Room</button>
+
+    <hr style="border-color:#34445c;margin:20px 0">
+
+    <h3>Join Existing Room</h3>
+    <input id="joinCode" maxlength="6" placeholder="Enter 6-digit room code">
+    <button class="secondary" onclick="joinRoom()">Join Room</button>
+
+    <p id="message"></p>
+  </div>
+
+  <div id="gameArea">
+    <div class="panel">
+      <p>ROOM CODE</p>
+      <p id="roomCode">------</p>
+      <button class="secondary" onclick="copyRoom()">Copy Room Code</button>
+      <p id="status">Waiting for opponent...</p>
+    </div>
+
+    <div class="panel">
+      <div class="scores">
+        <div class="score">
+          <h3 id="name1">Player 1</h3>
+          <p id="score1" style="color:#39f5a5">0</p>
+        </div>
+        <div class="score">
+          <h3 id="name2">Player 2</h3>
+          <p id="score2" style="color:#38bdf8">0</p>
+        </div>
+      </div>
+
+      <canvas id="gameCanvas" width="600" height="600"></canvas>
+
+      <h2 id="gameMessage">Waiting for player 2...</h2>
+      <button id="restartBtn" onclick="restartGame()" class="hidden">
+        Restart Game
+      </button>
+    </div>
+
+    <div class="panel controls">
+      <p><b>PLAYER 1:</b> Arrow Keys ↑ ↓ ← →</p>
+      <p><b>PLAYER 2:</b> W A S D</p>
+      <p>Collect food and avoid collisions!</p>
+    </div>
+  </div>
+
+</div>
+
+<!-- Firebase SDK -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+
+<script>
+
+// ========================================
+// 1. FIREBASE CONFIGURATION
+// REPLACE THESE VALUES WITH YOUR FIREBASE CONFIG
+// ========================================
+
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT",
+  storageBucket: "YOUR_PROJECT.firebasestorage.app",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
+};
+
+firebase.initializeApp(firebaseConfig);
+
+const auth = firebase.auth();
+const db = firebase.database();
+
+let currentRoom = "";
+let myRole = "";
+let myName = "";
+let isHost = false;
+let gameStarted = false;
+let gameTimer = null;
+let stateListener = null;
+let playerListener = null;
+
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+const SIZE = 30;
+const CELL = 20;
+
+const directions = {
+  ArrowUp:    {x:0,y:-1},
+  ArrowDown:  {x:0,y:1},
+  ArrowLeft:  {x:-1,y:0},
+  ArrowRight: {x:1,y:0},
+  w: {x:0,y:-1},
+  s: {x:0,y:1},
+  a: {x:-1,y:0},
+  d: {x:1,y:0}
+};
+
+let localState = null;
+let currentDirection = {x:1,y:0};
+
+// ========================================
+// 2. AUTHENTICATION
+// ========================================
+
+auth.signInAnonymously()
+.catch(error => {
+  showMessage("Authentication error: " + error.message);
+});
+
+// ========================================
+// 3. HELPER FUNCTIONS
+// ========================================
+
+function showMessage(message) {
+  document.getElementById("message").textContent = message;
+}
+
+function randomFood() {
+  return {
+    x: Math.floor(Math.random()*SIZE),
+    y: Math.floor(Math.random()*SIZE)
+  };
+}
+
+function createInitialState() {
+  return {
+    snake1:[
+      {x:5,y:10},
+      {x:4,y:10},
+      {x:3,y:10}
+    ],
+    snake2:[
+      {x:24,y:20},
+      {x:25,y:20},
+      {x:26,y:20}
+    ],
+    food:randomFood(),
+    score1:0,
+    score2:0,
+    started:false,
+    over:false,
+    winner:""
+  };
+}
+
+// ========================================
+// 4. CREATE ROOM
+// ========================================
+
+async function createRoom() {
+  try {
+    if(!auth.currentUser) {
+      showMessage("Connecting to Firebase. Please wait...");
+      return;
+    }
+
+    myName = document.getElementById("playerName").value.trim() || "Player 1";
+
+    const roomRef = db.ref("rooms").push();
+    currentRoom = roomRef.key.substring(0,6).toUpperCase();
+
+    const initial = createInitialState();
+
+    await db.ref("rooms/"+currentRoom).set({
+      host:auth.currentUser.uid,
+      players:{
+        p1:{
+          uid:auth.currentUser.uid,
+          name:myName,
+          direction:{x:1,y:0}
+        },
+        p2:null
+      },
+      state:initial,
+      createdAt:firebase.database.ServerValue.TIMESTAMP
+    });
+
+    myRole = "p1";
+    isHost = true;
+
+    enterGame();
+
+  } catch(error) {
+    showMessage(error.message);
+  }
+}
+
+// ========================================
+// 5. JOIN ROOM
+// ========================================
+
+async function joinRoom() {
+  try {
+    if(!auth.currentUser) {
+      showMessage("Connecting to Firebase. Please wait...");
+      return;
+    }
+
+    myName = document.getElementById("playerName").value.trim() || "Player 2";
+
+    currentRoom = document.getElementById("joinCode")
+      .value.trim().toUpperCase();
+
+    if(currentRoom.length !== 6) {
+      showMessage("Enter a valid 6-character room code.");
+      return;
+    }
+
+    const roomRef = db.ref("rooms/"+currentRoom);
+
+    const result = await roomRef.transaction(room => {
+      if(!room || room.players.p2) return;
+      if(room.players.p1.uid === auth.currentUser.uid) return;
+
+      room.players.p2 = {
+        uid:auth.currentUser.uid,
+        name:myName,
+        direction:{x:-1,y:0}
+      };
+
+      room.state.started = true;
+      return room;
+    });
+
+    if(!result.committed) {
+      showMessage("Room not available or already full.");
+      return;
+    }
+
+    myRole = "p2";
+    isHost = false;
+
+    enterGame();
+
+  } catch(error) {
+    showMessage(error.message);
+  }
+}
+
+// ========================================
+// 6. ENTER GAME
+// ========================================
+
+function enterGame() {
+  document.getElementById("lobby").style.display = "none";
+  document.getElementById("gameArea").style.display = "block";
+  document.getElementById("roomCode").textContent = currentRoom;
+
+  document.getElementById("name1").textContent = "Player 1";
+  document.getElementById("name2").textContent = "Player 2";
+
+  listenToRoom();
+}
+
+// ========================================
+// 7. REAL TIME DATABASE LISTENERS
+// ========================================
+
+function listenToRoom() {
+
+  const roomRef = db.ref("rooms/"+currentRoom);
+
+  stateListener = roomRef.on("value", snapshot => {
+
+    if(!snapshot.exists()) {
+      document.getElementById("status").textContent = "Room closed.";
+      return;
+    }
+
+    const room = snapshot.val();
+
+    document.getElementById("name1").textContent =
+      room.players.p1?.name || "Player 1";
+
+    document.getElementById("name2").textContent =
+      room.players.p2?.name || "Waiting...";
+
+    if(room.players.p2 && !gameStarted) {
+      gameStarted = true;
+      document.getElementById("status").textContent =
+        "Both players connected! Game started.";
+    }
+
+    if(!room.players.p2) {
+      document.getElementById("status").textContent =
+        "Waiting for Player 2...";
+    }
+
+    if(room.state) {
+      localState = room.state;
+      renderGame();
+    }
+
+    if(localState?.over) {
+      document.getElementById("restartBtn").classList.remove("hidden");
+    }
+
+  });
+
+  // Host reads Player 2 direction updates.
+  if(isHost) {
+    playerListener = roomRef.child("players/p2/direction")
+      .on("value", snapshot => {
+        if(snapshot.exists()) {
+          window.player2Direction = snapshot.val();
+        }
+      });
+
+    startHostGame();
+  }
+}
+
+// ========================================
+// 8. KEYBOARD CONTROLS
+// ========================================
+
+document.addEventListener("keydown", async event => {
+
+  const key = event.key.length === 1
+    ? event.key.toLowerCase()
+    : event.key;
+
+  const direction = directions[key];
+
+  if(!direction || !currentRoom) return;
+
+  if(myRole === "p1" && key.startsWith("Arrow")) {
+    event.preventDefault();
+  }
+
+  if(myRole === "p2" && ["w","a","s","d"].includes(key)) {
+    event.preventDefault();
+  }
+
+  // Player 1 controls
+  if(myRole === "p1" && key.startsWith("Arrow")) {
+    currentDirection = direction;
+
+    await db.ref("rooms/"+currentRoom+
+      "/players/p1/direction").set(direction);
+  }
+
+  // Player 2 controls
+  if(myRole === "p2" && ["w","a","s","d"].includes(key)) {
+    currentDirection = direction;
+
+    await db.ref("rooms/"+currentRoom+
+      "/players/p2/direction").set(direction);
+  }
+});
+
+// ========================================
+// 9. DIRECTION VALIDATION
+// ========================================
+
+function safeDirection(oldDir,newDir) {
+  if(oldDir.x + newDir.x === 0 &&
+     oldDir.y + newDir.y === 0) {
+    return oldDir;
+  }
+  return newDir;
+}
+
+// ========================================
+// 10. HOST GAME ENGINE
+// Only host calculates game movement.
+// ========================================
+
+function startHostGame() {
+
+  if(gameTimer) clearInterval(gameTimer);
+
+  gameTimer = setInterval(async () => {
+
+    try {
+
+      const roomRef = db.ref("rooms/"+currentRoom);
+      const snapshot = await roomRef.get();
+
+      if(!snapshot.exists()) {
+        clearInterval(gameTimer);
+        return;
+      }
+
+      const room = snapshot.val();
+
+      if(!room.players.p2) return;
+
+      let state = room.state;
+
+      if(!state || state.over) return;
+
+      let d1 = safeDirection(
+        state.dir1 || {x:1,y:0},
+        room.players.p1.direction || {x:1,y:0}
+      );
+
+      let d2 = safeDirection(
+        state.dir2 || {x:-1,y:0},
+        room.players.p2.direction || {x:-1,y:0}
+      );
+
+      state.dir1 = d1;
+      state.dir2 = d2;
+
+      const s1 = moveSnake(state.snake1,d1);
+      const s2 = moveSnake(state.snake2,d2);
+
+      state.snake1 = s1;
+      state.snake2 = s2;
+
+      const h1 = s1[0];
+      const h2 = s2[0];
+
+      const hitWall = p =>
+        p.x<0 || p.y<0 || p.x>=SIZE || p.y>=SIZE;
+
+      const hitBody = (head,snake) =>
+        snake.slice(1).some(p =>
+          p.x===head.x && p.y===head.y
+        );
+
+      const same = (a,b) =>
+        a.x===b.x && a.y===b.y;
+
+      const dead1 =
+        hitWall(h1) ||
+        hitBody(h1,s1) ||
+        hitBody(h1,s2);
+
+      const dead2 =
+        hitWall(h2) ||
+        hitBody(h2,s2) ||
+        hitBody(h2,s1);
+
+      if(same(h1,h2)) {
+        state.over = true;
+        state.winner = "Draw!";
+      } else if(dead1 && dead2) {
+        state.over = true;
+        state.winner = "Draw!";
+      } else if(dead1) {
+        state.over = true;
+        state.winner = "Player 2 Wins!";
+      } else if(dead2) {
+        state.over = true;
+        state.winner = "Player 1 Wins!";
+      }
+
+      if(state.over) {
+        await roomRef.child("state").set(state);
+        return;
+      }
+
+      if(same(h1,state.food)) {
+        state.score1 += 10;
+        s1.push({...s1[s1.length-1]});
+        state.food = randomFood();
+      }
+
+      if(same(h2,state.food)) {
+        state.score2 += 10;
+        s2.push({...s2[s2.length-1]});
+        state.food = randomFood();
+      }
+
+      await roomRef.child("state").set(state);
+
+    } catch(error) {
+      console.error("Game error:",error);
+    }
+
+  },150);
+}
+
+function moveSnake(snake,direction) {
+  const head = {
+    x:snake[0].x+direction.x,
+    y:snake[0].y+direction.y
+  };
+
+  return [head,...snake.slice(0,-1)];
+}
+
+// ========================================
+// 11. DRAW GAME
+// ========================================
+
+function renderGame() {
+
+  if(!localState) return;
+
+  ctx.clearRect(0,0,600,600);
+
+  // Background grid
+  ctx.strokeStyle="#14243a";
+  ctx.lineWidth=0.5;
+
+  for(let i=0;i<=600;i+=CELL) {
+    ctx.beginPath();
+    ctx.moveTo(i,0);
+    ctx.lineTo(i,600);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(0,i);
+    ctx.lineTo(600,i);
+    ctx.stroke();
+  }
+
+  // Food
+  if(localState.food) {
+    ctx.fillStyle="#ff4757";
+    ctx.beginPath();
+    ctx.arc(
+      localState.food.x*CELL+10,
+      localState.food.y*CELL+10,
+      8,0,Math.PI*2
+    );
+    ctx.fill();
+  }
+
+  // Draw snakes
+  function drawSnake(snake,color) {
+    if(!snake) return;
+
+    snake.forEach((part,index) => {
+      ctx.fillStyle = index===0 ? "#ffffff" : color;
+      ctx.beginPath();
+      ctx.roundRect(
+        part.x*CELL+1,
+        part.y*CELL+1,
+        CELL-2,
+        CELL-2,
+        5
+      );
+      ctx.fill();
+    });
+  }
+
+  drawSnake(localState.snake1,"#39f5a5");
+  drawSnake(localState.snake2,"#38bdf8");
+
+  document.getElementById("score1").textContent =
+    localState.score1;
+
+  document.getElementById("score2").textContent =
+    localState.score2;
+
+  if(!localState.started) {
+    document.getElementById("gameMessage").textContent =
+      "Waiting for opponent...";
+  } else if(localState.over) {
+    document.getElementById("gameMessage").textContent =
+      localState.winner;
+  } else {
+    document.getElementById("gameMessage").textContent =
+      "Game Running!";
+  }
+}
+
+// ========================================
+// 12. RESTART GAME
+// ========================================
+
+async function restartGame() {
+
+  if(!isHost) {
+    document.getElementById("gameMessage").textContent =
+      "Only Player 1 can restart the game.";
+    return;
+  }
+
+  try {
+
+    const roomRef = db.ref("rooms/"+currentRoom);
+    const snapshot = await roomRef.get();
+
+    if(!snapshot.exists()) return;
+
+    const room = snapshot.val();
+
+    if(!room.players.p2) return;
+
+    await roomRef.child("players/p1/direction").set({x:1,y:0});
+    await roomRef.child("players/p2/direction").set({x:-1,y:0});
+
+    await roomRef.child("state").set({
+      ...createInitialState(),
+      started:true,
+      dir1:{x:1,y:0},
+      dir2:{x:-1,y:0}
+    });
+
+    currentDirection = myRole==="p1"
+      ? {x:1,y:0}
+      : {x:-1,y:0};
+
+    document.getElementById("restartBtn").classList.add("hidden");
+
+  } catch(error) {
+    console.error(error);
+  }
+}
+
+// ========================================
+// 13. COPY ROOM CODE
+// ========================================
+
+function copyRoom() {
+  navigator.clipboard.writeText(currentRoom)
+    .then(() => {
+      document.getElementById("status").textContent =
+        "Room code copied!";
+    })
+    .catch(() => {
+      document.getElementById("status").textContent =
+        "Room code: "+currentRoom;
+    });
+}
+
+</script>
+</body>
+</html>
